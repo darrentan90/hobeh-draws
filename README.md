@@ -46,3 +46,33 @@ number takes every older build off the feed. Add fields rather than changing
 them where you can; unknown fields are dropped harmlessly.
 
 Draw results are published by Singapore Pools.
+
+## How this file gets updated
+
+`.github/workflows/update-draws.yml` runs on a schedule and commits `latest.json`
+itself. **Nothing of mine has to be switched on** — not the MacBook, not the
+pieface. The app reads this file straight from `raw.githubusercontent.com`.
+
+    build_latest.py   decides what to fetch, converts it to the app's schema
+    scraper.py        a byte-for-byte copy of the pieface updater's parser
+    scraper.sha256    fails the build if that copy drifts
+    summarise.py      the commit message
+
+The pieface updater still writes the Obsidian vault on its own timers. That is
+now an **independent** job — it can be off for a week without the app noticing,
+and the app being current says nothing about whether the vault is.
+
+`npm run publish-draws:push` in the app repo still works and still publishes
+from the vault. It is now a manual override for when this workflow is broken,
+not the normal path — and it will overwrite whatever the workflow last wrote.
+
+### Keeping the two parsers in step
+
+`scraper.py` is copied, not imported, because the pieface and GitHub cannot
+share a filesystem. After editing the pieface copy:
+
+    cp ~/AIOS-Vault/Efforts/买HoBeh/pieface-updater/update_4d_toto.py scraper.py
+    shasum -a 256 scraper.py | awk '{print $1"  scraper.py"}' > scraper.sha256
+
+The workflow's first step is `--check-scraper`, so a forgotten copy fails the
+run loudly rather than publishing whatever the stale parser produces.
