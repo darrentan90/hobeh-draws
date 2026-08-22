@@ -16,17 +16,22 @@ name: Update draws
 
 on:
   schedule:
-    # Times are UTC; Singapore is UTC+8. Draws are at 6.30pm SGT and results go
-    # up within the hour or two, so this is every 30 minutes from 6.30pm to
-    # 10pm SGT — and nothing at all for the other 20 hours of the day.
+    # Times are UTC; Singapore is UTC+8. Every five minutes from 6.30pm to
+    # 10pm SGT, and not at all for the other twenty hours.
     #
-    # Daily rather than only on draw nights: special and cascade draws do not
-    # follow the Wed/Sat/Sun and Mon/Thu pattern, and a run that finds nothing
-    # costs two small fragment fetches and stops. Missing a draw is worse than
-    # eight cheap no-ops.
-    - cron: "30 10 * * *"          # 6.30pm SGT
-    - cron: "0,30 11-13 * * *"     # 7pm to 9.30pm SGT, every half hour
-    - cron: "0 14 * * *"           # 10pm SGT
+    # Five minutes is the floor GitHub allows, and it is only affordable
+    # because of the due-today check in build_latest.py: once a game's draw
+    # for the day has been collected, every remaining run answers "nothing
+    # due" and exits in a tenth of a second without opening a connection. On
+    # a night with no draw, that is every run. So the frequency buys latency
+    # on the one run that matters and costs Singapore Pools nothing on the
+    # rest.
+    #
+    # GitHub's scheduler is best-effort and is routinely late under load, so
+    # treat this as "within about five to fifteen minutes", not a guarantee.
+    - cron: "30-55/5 10 * * *"   # 6.30pm - 6.55pm SGT
+    - cron: "*/5 11-13 * * *"    # 7pm - 9.55pm SGT
+    - cron: "0 14 * * *"         # 10pm SGT
   # So a missed draw can be picked up by hand without waiting for the next slot.
   workflow_dispatch:
 

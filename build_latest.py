@@ -220,6 +220,33 @@ def toto_shares(snapshot: dict) -> tuple[str, list, float | None] | None:
     return when[0], shares, pool
 
 
+def due_games(data: dict, today: str) -> list[str]:
+    """
+    Which games could still publish a result today.
+
+    This is what lets the job poll every five minutes without hammering
+    anybody: the moment today's draw has been collected, every remaining run
+    of the evening answers "nothing due" and exits before opening a single
+    connection. On a night with no draw at all, that is every run.
+
+    The authority is `upcoming.drawDate`, which was scraped from Singapore
+    Pools rather than derived from the Wed/Sat/Sun and Mon/Thu pattern — that
+    pattern is a fallback that special and cascade draws break, and a cascade
+    TOTO draw lands on a Friday about once every twenty-four draws.
+
+    `expected <= today` rather than `==` so a draw the job was down for stays
+    due instead of being skipped for ever.
+    """
+    due = []
+    for game, key in (("4D", "fourD"), ("TOTO", "toto")):
+        if any(row["draw_date"] == today for row in data.get(key) or []):
+            continue  # already collected — done for the day
+        expected = ((data.get("upcoming") or {}).get(key) or {}).get("drawDate")
+        if not expected or expected <= today:
+            due.append(game)
+    return due
+
+
 def collect(game: str, existing: list, scraper, session) -> list:
     """Fetch draws newer than what is already published."""
     scrape_draw = scraper.scrape_4d_draw if game == "4D" else scraper.scrape_toto_draw
@@ -341,6 +368,8 @@ def main() -> int:
                         help="only verify the vendored scraper, then exit")
     parser.add_argument("--dry-run", action="store_true",
                         help="scrape and report, but do not write latest.json")
+    parser.add_argument("--force", action="store_true",
+                        help="scrape even when nothing is due today")
     args = parser.parse_args()
 
     if args.check_scraper:
@@ -348,10 +377,20 @@ def main() -> int:
     if not check_scraper_matches():
         return 1
 
+    data = read_latest()
+    today = datetime.now(SGT).strftime("%Y-%m-%d")
+    games = ["4D", "TOTO"] if args.game == "all" else [args.game]
+
+    # Checked before the scraper is even imported, let alone a socket opened.
+    if not args.force:
+        games = [g for g in games if g in due_games(data, today)]
+        if not games:
+            print(f"nothing due on {today} — no request made")
+            return 0
+    print(f"due today ({today}): {', '.join(games)}")
+
     scraper = load_scraper()
     session = requests.Session()
-    data = read_latest()
-    games = ["4D", "TOTO"] if args.game == "all" else [args.game]
 
     changed = False
     for game in games:

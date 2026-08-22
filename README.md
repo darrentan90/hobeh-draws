@@ -49,14 +49,28 @@ Draw results are published by Singapore Pools.
 
 ## How this file gets updated
 
-`.github/workflows/update-draws.yml` runs on a schedule and commits `latest.json`
-itself. **Nothing of mine has to be switched on** — not the MacBook, not the
+`.github/workflows/update-draws.yml` runs every five minutes between 6.30pm and
+10pm SGT and commits `latest.json` itself. **Nothing of mine has to be switched on** — not the MacBook, not the
 pieface. The app reads this file straight from `raw.githubusercontent.com`.
 
     build_latest.py   decides what to fetch, converts it to the app's schema
     scraper.py        a byte-for-byte copy of the pieface updater's parser
     scraper.sha256    fails the build if that copy drifts
     summarise.py      the commit message
+
+### Why five minutes is not rude
+
+Every run starts by asking whether a draw is even possible today, from
+`upcoming.drawDate` — which Singapore Pools published, so it accounts for the
+special and cascade draws the Wed/Sat/Sun and Mon/Thu pattern misses. Once a
+game's draw for the day is collected, the rest of the evening's runs exit in
+about a tenth of a second having opened no connection at all. On a night with
+no draw, that is all 43 of them.
+
+So the traffic is roughly: one cheap fragment fetch every five minutes while
+genuinely waiting for a result, one result page when it lands, then nothing.
+GitHub's scheduler is best-effort and often late under load, so expect
+"within five to fifteen minutes", not exactly five.
 
 The pieface updater still writes the Obsidian vault on its own timers. That is
 now an **independent** job — it can be off for a week without the app noticing,
