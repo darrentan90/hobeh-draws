@@ -38,8 +38,16 @@ reach phones on the next pull-to-refresh — no app release involved.
 ```
 
 Both lists are newest-first. Dates are ISO. `draw_no` is `null` for early 4D
-draws whose number was never recorded. TOTO carries no prize/share data here —
-the app keeps its own for the draws it has.
+draws whose number was never recorded.
+
+The **newest** TOTO draw also carries `shares` (the seven prize groups) and
+`group_1_prize` (the pool as printed, which is not `winners × amount` and cannot
+be recomputed from the table). No older row does: the app bundles the historical
+prize data already, so a second copy here would only grow the file every phone
+downloads. The old table is superseded when the new one lands, not before —
+Singapore Pools puts the winning numbers up several minutes ahead of the prize
+table, and dropping the previous draw's on the strength of the numbers alone
+leaves the app with no prize data at all.
 
 The app ignores a file whose `version` it does not recognise, so bumping that
 number takes every older build off the feed. Add fields rather than changing
@@ -66,6 +74,11 @@ special and cascade draws the Wed/Sat/Sun and Mon/Thu pattern misses. Once a
 game's draw for the day is collected, the rest of the evening's runs exit in
 about a tenth of a second having opened no connection at all. On a night with
 no draw, that is all 43 of them.
+
+A TOTO draw is not "collected" until its prize table has arrived as well as its
+numbers, because the two are published minutes apart and the table is the half
+people open the app for. So a TOTO evening keeps checking through that gap, at
+one fragment per run and no result pages.
 
 So the traffic is roughly: one cheap fragment fetch every five minutes while
 genuinely waiting for a result, one result page when it lands, then nothing.

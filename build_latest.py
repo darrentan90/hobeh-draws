@@ -236,19 +236,49 @@ def due_games(data: dict, today: str) -> list[str]:
 
     `expected <= today` rather than `==` so a draw the job was down for stays
     due instead of being skipped for ever.
+
+    A TOTO DRAW IS NOT FINISHED WHEN ITS NUMBERS ARRIVE
+    ---------------------------------------------------
+    Singapore Pools publishes the winning numbers first and the prize table
+    some minutes later. Treating "there is a row for today" as done for the day
+    therefore stopped the evening at the numbers: draw 4211 was collected at
+    7.03pm with no `winning_shares` on the page yet, every remaining run
+    answered "nothing due" without opening a connection, and the prize table
+    that went up shortly afterwards was never fetched at all. The app showed
+    the newest draw with no group prize and no shares — the one thing on Latest
+    Draw people open it for — and the strip below had already dropped the
+    previous draw's table, so there was nothing to fall back to either.
+
+    So TOTO stays due until the row for today carries `shares`. Those extra
+    runs cost one pre-rendered fragment each, only on the evening of a TOTO
+    draw, and only in the gap between the numbers and the table.
     """
     due = []
     for game, key in (("4D", "fourD"), ("TOTO", "toto")):
-        if any(row["draw_date"] == today for row in data.get(key) or []):
-            continue  # already collected — done for the day
+        today_row = next(
+            (row for row in data.get(key) or [] if row["draw_date"] == today), None
+        )
+        if today_row is not None:
+            # Collected. Done, unless the TOTO prize table is still to come.
+            if game == "TOTO" and not today_row.get("shares"):
+                due.append(game)
+            continue
         expected = ((data.get("upcoming") or {}).get(key) or {}).get("drawDate")
         if not expected or expected <= today:
             due.append(game)
     return due
 
 
-def collect(game: str, existing: list, scraper, session) -> list:
-    """Fetch draws newer than what is already published."""
+def collect(game: str, existing: list, scraper, session) -> tuple[list, dict | None]:
+    """
+    Fetch draws newer than what is already published.
+
+    Returns the new rows and the snapshot they were decided from. The snapshot
+    is handed back rather than dropped because the TOTO prize table lives in it
+    too, and re-fetching the same fragment a second time in one run doubles the
+    cost of exactly the runs `due_games` now adds — the evening ones waiting
+    for the table to go up.
+    """
     scrape_draw = scraper.scrape_4d_draw if game == "4D" else scraper.scrape_toto_draw
     scrape_snapshot = (
         scraper.scrape_4d_snapshot if game == "4D" else scraper.scrape_toto_snapshot
@@ -271,7 +301,7 @@ def collect(game: str, existing: list, scraper, session) -> list:
 
     if published is not None and published <= have:
         print(f"{game}: up to date at draw {have}")
-        return []
+        return [], snapshot
 
     target = published if published is not None else have + MAX_NEW
     print(f"{game}: have {have}, published {published} — fetching forward")
@@ -293,7 +323,7 @@ def collect(game: str, existing: list, scraper, session) -> list:
             import time
 
             time.sleep(scraper.DELAY)
-    return added
+    return added, snapshot
 
 
 def upcoming_block(game: str, scraper, session, previous: dict | None) -> dict | None:
@@ -395,7 +425,7 @@ def main() -> int:
     changed = False
     for game in games:
         key = "fourD" if game == "4D" else "toto"
-        added = collect(game, data[key], scraper, session)
+        added, snapshot = collect(game, data[key], scraper, session)
         if added:
             data[key] = trim(data[key] + added)
             changed = True
@@ -403,11 +433,14 @@ def main() -> int:
         # TOTO prize tables live only in the snapshot, and only for the newest
         # draw. Attached after the merge so it finds the row wherever it landed.
         if game == "TOTO":
-            try:
-                snapshot = scraper.scrape_toto_snapshot(session) or {}
-            except Exception as exc:  # noqa: BLE001
-                print(f"TOTO: could not read the prize table ({exc})")
-                snapshot = {}
+            if snapshot is None:
+                # `collect` could not read the fragment. Try once more rather
+                # than silently publishing a draw with no prize table.
+                try:
+                    snapshot = scraper.scrape_toto_snapshot(session) or {}
+                except Exception as exc:  # noqa: BLE001
+                    print(f"TOTO: could not read the prize table ({exc})")
+                    snapshot = {}
             parsed = toto_shares(snapshot)
             newest = max((r["draw_date"] for r in data["toto"]), default=None)
             if parsed:
@@ -428,20 +461,30 @@ def main() -> int:
             # theirs: the app lays this file over its bundled archive, which
             # already holds the historical prize data, so keeping a second copy
             # here only grows the file every phone downloads.
-            for row in data["toto"]:
-                if row["draw_date"] == newest:
-                    continue
-                if "shares" in row or "group_1_prize" in row:
-                    row.pop("shares", None)
-                    row.pop("group_1_prize", None)
-                    changed = True
+            #
+            # SUPERSEDED, NOT MERELY DELETED. The strip waits until the newest
+            # draw actually carries its own table, because the numbers go up
+            # before the table does and stripping on the numbers alone leaves
+            # the app with no prize data at all — not for the draw that just
+            # happened, and not for the one before it either. That is what
+            # draw 4211 shipped as. At most one older row is ever holding on to
+            # a table, so the file does not grow while it waits.
+            newest_has_table = any(
+                r["draw_date"] == newest and r.get("shares") for r in data["toto"]
+            )
+            if newest_has_table:
+                for row in data["toto"]:
+                    if row["draw_date"] == newest:
+                        continue
+                    if "shares" in row or "group_1_prize" in row:
+                        row.pop("shares", None)
+                        row.pop("group_1_prize", None)
+                        changed = True
 
             # Said loudly, because it is the one thing on Latest Draw people
             # open the app for. The snapshot sometimes publishes the numbers
             # before the prize table, so a later run in the evening picks it up.
-            if newest and not any(
-                r["draw_date"] == newest and r.get("shares") for r in data["toto"]
-            ):
+            if newest and not newest_has_table:
                 print(f"TOTO: WARNING — newest draw {newest} has no prize table yet")
 
         before = (data.get("upcoming") or {}).get(key)
