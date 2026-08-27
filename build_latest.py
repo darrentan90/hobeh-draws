@@ -408,6 +408,11 @@ def main() -> int:
         return 1
 
     data = read_latest()
+    # What the app is already being served. A TOTO draw that is in here has
+    # been published as a whole draw and must never be taken back off; one that
+    # is not is a draw this run collected, and is subject to the completeness
+    # gate below.
+    already_published = {row["draw_date"] for row in data.get("toto") or []}
     today = datetime.now(SGT).strftime("%Y-%m-%d")
     games = ["4D", "TOTO"] if args.game == "all" else [args.game]
 
@@ -422,13 +427,35 @@ def main() -> int:
     scraper = load_scraper()
     session = requests.Session()
 
-    changed = False
+    def payload(d: dict) -> str:
+        """
+        Everything in the file except the timestamp on it.
+
+        `changed` used to be a flag half a dozen branches had to remember to
+        set, and the withholding above broke it: a run that collects a TOTO
+        draw and then holds it back has added rows to `data` and published
+        nothing, so the flag said "changed" and the job stamped a new
+        `generated`, committed a byte-identical file and busted every phone's
+        cache for it. Comparing what actually goes into the file cannot drift
+        from what the file contains, because it *is* what the file contains.
+        """
+        return json.dumps(
+            {k: v for k, v in d.items() if k != "generated"},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    published_before = payload(data)
+    # Set when a TOTO draw is being held back, so the rest of the TOTO block
+    # holds back with it. See the withholding note below.
+    toto_withheld = False
+
     for game in games:
         key = "fourD" if game == "4D" else "toto"
         added, snapshot = collect(game, data[key], scraper, session)
         if added:
             data[key] = trim(data[key] + added)
-            changed = True
 
         # TOTO prize tables live only in the snapshot, and only for the newest
         # draw. Attached after the merge so it finds the row wherever it landed.
@@ -448,13 +475,49 @@ def main() -> int:
                 for row in data["toto"]:
                     if row["draw_date"] != date:
                         continue
-                    if row.get("shares") != shares:
-                        row["shares"] = shares
-                        changed = True
-                    if pool is not None and row.get("group_1_prize") != int(pool):
+                    row["shares"] = shares
+                    if pool is not None:
                         row["group_1_prize"] = int(pool)
-                        changed = True
                     break
+
+            # ── A TOTO DRAW IS PUBLISHED WHOLE OR NOT AT ALL ──────────────
+            #
+            # Singapore Pools puts the winning numbers up several minutes
+            # before the prize table, and this used to forward each half the
+            # moment it landed: one commit carrying a draw with no group prize
+            # and no winning shares, then a second commit some minutes later
+            # filling them in. Two publishes, and the first of them a draw that
+            # is not finished being a draw.
+            #
+            # That is not a cosmetic problem. The app treats the newest row as
+            # the latest draw the instant it arrives — it opens Latest Draw on
+            # it and fires "the TOTO results are out" — so the first publish
+            # sent every phone a notification about a result whose prize table
+            # did not exist yet, and the user who tapped it got a Latest Draw
+            # with the payout half of the screen missing.
+            #
+            # So a newly collected TOTO draw is WITHHELD until its prize table
+            # is attached. It stays out of the published file, `due_games` sees
+            # no row for today and keeps the game due, and a later run in the
+            # evening collects the numbers and the table together and publishes
+            # them as one update. The cost is re-fetching one result page on
+            # each run in the gap, which is only ever the evening of a TOTO
+            # draw and only ever the minutes between the two halves.
+            withheld = [
+                row
+                for row in data["toto"]
+                if row["draw_date"] not in already_published and not row.get("shares")
+            ]
+            if withheld:
+                dates = ", ".join(row["draw_date"] for row in withheld)
+                print(
+                    f"TOTO: WITHHELD {dates} — numbers are up but the prize "
+                    "table is not. Nothing published; the next run will try "
+                    "again and publish the draw whole."
+                )
+                data["toto"] = [row for row in data["toto"] if row not in withheld]
+                newest = max((r["draw_date"] for r in data["toto"]), default=None)
+                toto_withheld = True
 
             # The prize table is only ever carried for the newest draw, and it
             # has to be carried for the newest draw. Older overlay rows drop
@@ -467,8 +530,9 @@ def main() -> int:
             # before the table does and stripping on the numbers alone leaves
             # the app with no prize data at all — not for the draw that just
             # happened, and not for the one before it either. That is what
-            # draw 4211 shipped as. At most one older row is ever holding on to
-            # a table, so the file does not grow while it waits.
+            # draw 4211 shipped as. With the withholding above the newest
+            # published draw always has its table, but the guard stays: it is
+            # what makes the two rules independent of each other.
             newest_has_table = any(
                 r["draw_date"] == newest and r.get("shares") for r in data["toto"]
             )
@@ -479,21 +543,30 @@ def main() -> int:
                     if "shares" in row or "group_1_prize" in row:
                         row.pop("shares", None)
                         row.pop("group_1_prize", None)
-                        changed = True
 
             # Said loudly, because it is the one thing on Latest Draw people
-            # open the app for. The snapshot sometimes publishes the numbers
-            # before the prize table, so a later run in the evening picks it up.
+            # open the app for. Reaching this now means a draw that was already
+            # published has lost its table, which should not be possible.
             if newest and not newest_has_table:
                 print(f"TOTO: WARNING — newest draw {newest} has no prize table yet")
 
         before = (data.get("upcoming") or {}).get(key)
         after = upcoming_block(game, scraper, session, before)
-        if meaningful(after) != meaningful(before):
+        # The next-draw date moves the moment a draw is made: within seconds of
+        # 6.30pm the page stops saying "Thu 27 Aug" and starts saying "Mon 31
+        # Aug". Publishing that on its own, while the draw it steps over is
+        # being withheld for its prize table, is the same partial update in a
+        # different place — the app is told Thursday's draw has happened and
+        # handed Monday's date, with Thursday's result nowhere in the file.
+        # That is exactly what a user sees as "the next draw updated but the
+        # result did not". It travels with the draw or not at all.
+        if toto_withheld and game == "TOTO":
+            print("TOTO: next-draw date held back with the draw it follows")
+        elif meaningful(after) != meaningful(before):
             data.setdefault("upcoming", {})[key] = after
-            changed = True
 
-    if not changed:
+    data["version"] = SCHEMA_VERSION
+    if payload(data) == published_before:
         print("nothing new — latest.json untouched")
         return 0
 
@@ -501,7 +574,6 @@ def main() -> int:
         print("dry run — not writing")
         return 0
 
-    data["version"] = SCHEMA_VERSION
     data["generated"] = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     # Written whole, then renamed, so a reader never sees a half-written file.
     tmp = LATEST.with_suffix(".json.tmp")

@@ -16,23 +16,59 @@ name: Update draws
 
 on:
   schedule:
-    # Times are UTC; Singapore is UTC+8. Every five minutes from 6.30pm to
-    # 10pm SGT, and not at all for the other twenty hours.
+    # Times are UTC; Singapore is UTC+8. Every ten minutes from 6.30pm to 10pm
+    # SGT — when a result can actually appear — plus four cheap catch-up runs
+    # spread through the following twelve hours.
     #
-    # Five minutes is the floor GitHub allows, and it is only affordable
-    # because of the due-today check in build_latest.py: once a game's draw
-    # for the day has been collected, every remaining run answers "nothing
-    # due" and exits in a tenth of a second without opening a connection. On
-    # a night with no draw, that is every run. So the frequency buys latency
-    # on the one run that matters and costs Singapore Pools nothing on the
-    # rest.
+    # Polling this often is only affordable because of the due-today check in
+    # build_latest.py: once a game's draw for the day has been collected AND
+    # (for TOTO) its prize table has landed, every remaining run answers
+    # "nothing due" and exits in a tenth of a second without opening a
+    # connection. On a night with no draw, that is every run. So the frequency
+    # buys latency on the one run that matters and costs Singapore Pools
+    # nothing on the rest.
     #
-    # GitHub's scheduler is best-effort and is routinely late under load, so
-    # treat this as "within about five to fifteen minutes", not a guarantee.
-    - cron: "30-55/5 10 * * *"   # 6.30pm - 6.55pm SGT
-    - cron: "*/5 11-13 * * *"    # 7pm - 9.55pm SGT
-    - cron: "0 14 * * *"         # 10pm SGT
-  # So a missed draw can be picked up by hand without waiting for the next slot.
+    # GitHub's scheduler is best-effort. It is not merely "late under load" —
+    # IT DROPS RUNS, and it drops whole days. Measured on this repo: the
+    # */5 schedule below asked for about forty firings across the evening
+    # window and got six on 25 Aug, six on 26 Aug, and **none at all** on
+    # 27 Aug, when a TOTO draw was made. Nothing was disabled, nothing failed;
+    # the runs were simply never created. That is the single reason a draw the
+    # scraper could see never reached a phone.
+    #
+    # Two changes follow from that, and they are different in kind:
+    #
+    #   1. The evening polls are every ten minutes rather than every five.
+    #      Dense schedules are the ones GitHub sheds first, and five minutes
+    #      was buying latency the scheduler was never delivering anyway — it
+    #      honoured roughly one firing in seven. Ten minutes asks for half as
+    #      much and is far likelier to be granted, which makes the *expected*
+    #      delay shorter, not longer.
+    #
+    #   2. THE CATCH-UPS BELOW ARE THE ACTUAL FIX. Every run in the evening
+    #      window can be dropped and the draw still gets published, because
+    #      the day does not end at 10pm any more: the job looks again at
+    #      midnight, at 4am, at 9am and at noon. `due_games` makes each of
+    #      those free when there is nothing outstanding — it exits without
+    #      opening a connection — so the whole safety net costs four no-op
+    #      runs a day and turns "the result never arrived" into "the result
+    #      arrived by morning at the very worst".
+    #
+    # Treat the evening window as "within about ten to thirty minutes", and
+    # the catch-ups as the guarantee.
+    - cron: "30,40,50 10 * * *"        # 6.30pm - 6.50pm SGT
+    - cron: "0,10,20,30,40,50 11-13 * * *"  # 7pm - 9.50pm SGT
+    - cron: "0 14 * * *"               # 10pm SGT
+    # Catch-ups, for an evening the scheduler dropped on the floor. Free on any
+    # day where the evening worked: `due_games` answers "nothing due" and the
+    # run ends in a tenth of a second having asked Singapore Pools nothing.
+    - cron: "0 16 * * *"               # midnight SGT
+    - cron: "0 20 * * *"               # 4am SGT
+    - cron: "0 1 * * *"                # 9am SGT
+    - cron: "0 4 * * *"                # noon SGT
+  # So a missed draw can be picked up by hand without waiting for the next
+  # slot. With the scheduler behaving the way it does, this is a normal tool
+  # rather than an emergency one: Actions → Update draws → Run workflow.
   workflow_dispatch:
 
 # GitHub's scheduler can fire minutes late under load and will happily start a
