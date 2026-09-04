@@ -7,8 +7,8 @@
 # now a separate concern that can be down for a week without the app noticing.
 #
 # COST TO SINGAPORE POOLS
-# A run with no new draw fetches two small pre-rendered fragments — the same
-# files their own site's JavaScript polls — and stops. Only a run that finds a
+# A look with no new draw fetches two small pre-rendered fragments — the same
+# files their own site's JavaScript polls — and stops. Only a look that finds a
 # genuinely new draw number opens a result page, one per draw, 1.5s apart.
 # See the header of build_latest.py.
 
@@ -16,74 +16,71 @@ name: Update draws
 
 on:
   schedule:
-    # Times are UTC; Singapore is UTC+8. Every ten minutes from 6.30pm to 10pm
-    # SGT — when a result can actually appear — plus four cheap catch-up runs
-    # spread through the following twelve hours.
+    # Times are UTC; Singapore is UTC+8.
     #
-    # Polling this often is only affordable because of the due-today check in
-    # build_latest.py: once a game's draw for the day has been collected AND
-    # (for TOTO) its prize table has landed, every remaining run answers
-    # "nothing due" and exits in a tenth of a second without opening a
-    # connection. On a night with no draw, that is every run. So the frequency
-    # buys latency on the one run that matters and costs Singapore Pools
-    # nothing on the rest.
+    # GITHUB'S SCHEDULER IS NOT A CLOCK. It is not merely "late under load" —
+    # it drops runs, and it drops whole evenings. Measured on this repo in the
+    # week to 4 Sep 2026: twenty-two entries between 6.30pm and 10pm SGT
+    # produced NO runs at all, on any evening. The first run each evening was
+    # the "10pm" entry, created at about 10.40pm, and that is what published
+    # Thursday's TOTO result four hours late. Nothing was disabled and nothing
+    # failed; the runs were simply never created.
     #
-    # GitHub's scheduler is best-effort. It is not merely "late under load" —
-    # IT DROPS RUNS, and it drops whole days. Measured on this repo: the
-    # */5 schedule below asked for about forty firings across the evening
-    # window and got six on 25 Aug, six on 26 Aug, and **none at all** on
-    # 27 Aug, when a TOTO draw was made. Nothing was disabled, nothing failed;
-    # the runs were simply never created. That is the single reason a draw the
-    # scraper could see never reached a phone.
+    # So the schedule no longer decides WHEN the scrape happens. Every run is
+    # `build_latest.py --watch`: it sleeps until 6.28pm SGT, then looks every
+    # ninety seconds until today's draws have all landed, pushing each one the
+    # moment it does, and hands over to a fresh run if its six hours would end
+    # before the draw. All the schedule has to do is get ONE run started at
+    # some point in the afternoon — which, measured, it does: the noon entry
+    # has turned up between 1pm and 5.30pm every day. Several afternoon
+    # entries follow, so that even a mostly-dropped day starts a watcher. On a
+    # day with no draw every one of them exits in a tenth of a second without
+    # opening a connection, because `due_games` says so.
     #
-    # Two changes follow from that, and they are different in kind:
-    #
-    #   1. The evening polls are every ten minutes rather than every five.
-    #      Dense schedules are the ones GitHub sheds first, and five minutes
-    #      was buying latency the scheduler was never delivering anyway — it
-    #      honoured roughly one firing in seven. Ten minutes asks for half as
-    #      much and is far likelier to be granted, which makes the *expected*
-    #      delay shorter, not longer.
-    #
-    #   2. THE CATCH-UPS BELOW ARE THE ACTUAL FIX. Every run in the evening
-    #      window can be dropped and the draw still gets published, because
-    #      the day does not end at 10pm any more: the job looks again at
-    #      midnight, at 4am, at 9am and at noon. `due_games` makes each of
-    #      those free when there is nothing outstanding — it exits without
-    #      opening a connection — so the whole safety net costs four no-op
-    #      runs a day and turns "the result never arrived" into "the result
-    #      arrived by morning at the very worst".
-    #
-    # Treat the evening window as "within about ten to thirty minutes", and
-    # the catch-ups as the guarantee.
-    - cron: "30,40,50 10 * * *"        # 6.30pm - 6.50pm SGT
-    - cron: "0,10,20,30,40,50 11-13 * * *"  # 7pm - 9.50pm SGT
-    - cron: "0 14 * * *"               # 10pm SGT
-    # Catch-ups, for an evening the scheduler dropped on the floor. Free on any
-    # day where the evening worked: `due_games` answers "nothing due" and the
-    # run ends in a tenth of a second having asked Singapore Pools nothing.
+    # `concurrency` below keeps this to one live watcher: a second run created
+    # while one is sleeping through the afternoon waits in the queue and, when
+    # its turn comes, finds nothing due and exits.
+    - cron: "0 7 * * *"                # 3pm SGT — afternoon starters
+    - cron: "0 8 * * *"                # 4pm
+    - cron: "0 9 * * *"                # 5pm
+    - cron: "30 9 * * *"               # 5.30pm
+    - cron: "0 10 * * *"               # 6pm
+    - cron: "15 10 * * *"              # 6.15pm
+    - cron: "30,45 10 * * *"           # 6.30pm, 6.45pm — evening fallbacks
+    - cron: "0,30 11-13 * * *"         # 7pm - 9.30pm
+    - cron: "0 14 * * *"               # 10pm
+    # Catch-ups, for a whole day the scheduler dropped on the floor. Free on
+    # any day where the evening worked: `due_games` answers "nothing due" and
+    # the run ends without asking Singapore Pools anything.
     - cron: "0 16 * * *"               # midnight SGT
-    - cron: "0 20 * * *"               # 4am SGT
-    - cron: "0 1 * * *"                # 9am SGT
-    - cron: "0 4 * * *"                # noon SGT
+    - cron: "0 20 * * *"               # 4am
+    - cron: "0 1 * * *"                # 9am
+    - cron: "0 4 * * *"                # noon
   # So a missed draw can be picked up by hand without waiting for the next
-  # slot. With the scheduler behaving the way it does, this is a normal tool
-  # rather than an emergency one: Actions → Update draws → Run workflow.
+  # slot, and how a watcher hands over to its successor when its six hours
+  # run out before the draw is in: Actions → Update draws → Run workflow.
   workflow_dispatch:
 
-# GitHub's scheduler can fire minutes late under load and will happily start a
-# second run while the first is still going. Two runs committing the same file
-# is a push race, so they queue instead.
+# One watcher at a time. A run created while another is live queues behind it
+# rather than racing it to the push; GitHub keeps one queued run per group and
+# replaces it with any newer one, which is exactly right here — every run is
+# the same watcher.
 concurrency:
   group: update-draws
   cancel-in-progress: false
 
 permissions:
   contents: write
+  # For `gh workflow run`: a watcher whose budget ends before the draw has
+  # landed starts its own successor.
+  actions: write
 
 jobs:
   update:
     runs-on: ubuntu-latest
+    # GitHub kills a job at six hours. `build_latest.py` budgets 5h35m for
+    # itself and hands over before that; this is the backstop.
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
 
@@ -100,24 +97,18 @@ jobs:
       - name: Check the vendored scraper
         run: python build_latest.py --check-scraper
 
-      - name: Scrape and rebuild latest.json
-        run: python build_latest.py
+      # Sleeps until the draw, looks every ninety seconds until the day's
+      # results are in, and runs publish.sh after every write — so a 4D result
+      # is on phones while the TOTO prize table is still being waited for.
+      - name: Watch for today's draws and publish each as it lands
+        env:
+          HOBEH_PUBLISH: "1"
+          GH_TOKEN: ${{ github.token }}
+          PYTHONUNBUFFERED: "1"
+        run: python build_latest.py --watch
 
-      # `build_latest.py` leaves the file untouched when nothing changed, so an
-      # empty diff is the normal outcome and must not fail or commit.
-      - name: Commit if anything changed
-        run: |
-          set -euo pipefail
-          if git diff --quiet -- latest.json; then
-            echo "no change to publish"
-            exit 0
-          fi
-          SUMMARY=$(python summarise.py)
-          git config user.name  "hobeh-draws bot"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add latest.json
-          git commit -m "$SUMMARY"
-          # Rebase rather than force: a concurrent run may have landed first,
-          # and its draws are as real as this run's.
-          git pull --rebase --autostash origin main
-          git push
+      # Belt and braces: a push that failed inside the watch (a rebase that
+      # could not be resolved, a network blip on the runner) is retried here.
+      # No change is the normal outcome and does nothing.
+      - name: Publish anything still unpushed
+        run: bash publish.sh

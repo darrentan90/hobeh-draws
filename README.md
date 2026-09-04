@@ -10,14 +10,20 @@ has been drawn since the last app release.
 
 ## Updating
 
-From the app repo:
+Nothing to do by hand. `.github/workflows/update-draws.yml` runs
+`build_latest.py --watch`: on a draw day the run sleeps until 6.28pm SGT, then
+looks at Singapore Pools every ninety seconds until the day's draws have all
+landed — a TOTO draw counts as landed only once its prize table is up — and
+pushes each result the moment it does. GitHub's `schedule:` is only trusted to
+start *a* run at some point in the afternoon, because measured on this repo it
+drops entire evenings; the run itself owns the timing, and hands over to a
+fresh run (`workflow_dispatch`) if its six hours would end before the draw.
 
-```sh
-npm run publish-draws:push
-```
+If a result is missing, look at the workflow's run list first, then
+Actions → Update draws → Run workflow to start a watcher by hand.
 
-That regenerates the file from the source notes and pushes it here. New draws
-reach phones on the next pull-to-refresh — no app release involved.
+Locally, `python build_latest.py --force --dry-run` scrapes and reports without
+writing; `--watch` without `HOBEH_PUBLISH=1` writes the file but never pushes.
 
 ## Format
 

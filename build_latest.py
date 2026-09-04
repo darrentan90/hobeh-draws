@@ -391,22 +391,14 @@ def meaningful(block: dict | None) -> dict | None:
     return {k: v for k, v in block.items() if k != "scrapedAt"}
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--game", choices=["4D", "TOTO", "all"], default="all")
-    parser.add_argument("--check-scraper", action="store_true",
-                        help="only verify the vendored scraper, then exit")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="scrape and report, but do not write latest.json")
-    parser.add_argument("--force", action="store_true",
-                        help="scrape even when nothing is due today")
-    args = parser.parse_args()
+def run_pass(args) -> bool:
+    """
+    One look at Singapore Pools: scrape whatever is due, rewrite latest.json if
+    anything changed.
 
-    if args.check_scraper:
-        return 0 if check_scraper_matches() else 1
-    if not check_scraper_matches():
-        return 1
-
+    Returns True when the file was written. Nothing here commits or pushes —
+    `publish()` does that, and `watch()` decides when.
+    """
     data = read_latest()
     # What the app is already being served. A TOTO draw that is in here has
     # been published as a whole draw and must never be taken back off; one that
@@ -421,7 +413,7 @@ def main() -> int:
         games = [g for g in games if g in due_games(data, today)]
         if not games:
             print(f"nothing due on {today} — no request made")
-            return 0
+            return False
     print(f"due today ({today}): {', '.join(games)}")
 
     scraper = load_scraper()
@@ -568,11 +560,11 @@ def main() -> int:
     data["version"] = SCHEMA_VERSION
     if payload(data) == published_before:
         print("nothing new — latest.json untouched")
-        return 0
+        return False
 
     if args.dry_run:
         print("dry run — not writing")
-        return 0
+        return False
 
     data["generated"] = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     # Written whole, then renamed, so a reader never sees a half-written file.
@@ -580,6 +572,173 @@ def main() -> int:
     tmp.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
     tmp.replace(LATEST)
     print(f"latest.json updated — 4D {len(data['fourD'])} rows, TOTO {len(data['toto'])} rows")
+    return True
+
+
+# ─── the watch ───────────────────────────────────────────────────────────────
+#
+# WHY A LOOP AND NOT A SCHEDULE
+# -----------------------------
+# GitHub's `schedule:` is not a clock. Measured on this repo in the week to
+# 4 Sep 2026: the workflow asked for twenty-two firings between 6.30pm and
+# 10pm SGT every evening and was given NONE — not one, on any evening. The
+# first run of each evening was the "10pm" entry, created around 10.40pm, and
+# that run is what published Thursday's TOTO draw four hours after it was
+# made. The phone's last look of the evening is 10.30pm, so the result was
+# found by the next Doze maintenance window instead, at about 1am. Every part
+# of that chain did its job; the schedule simply never started it.
+#
+# So the schedule is demoted to "start something, at some point in the
+# afternoon", which it does manage — the noon entry has arrived between 1pm
+# and 5.30pm every day — and the run itself owns the evening: it sleeps until
+# 6.28pm, then looks every ninety seconds until both games are collected,
+# committing and pushing each change the moment it lands. A 4D result goes out
+# at 6.35 while the TOTO prize table is still being waited for. On a day with
+# no draw the loop exits before opening a connection, exactly as before.
+#
+# A job may run for six hours. If this one cannot reach the end of the window
+# it hands over: it sleeps out its budget and then dispatches a fresh run of
+# the same workflow, which starts within a minute — `workflow_dispatch` is the
+# one event GITHUB_TOKEN may raise that creates a run. The hand-over happens at
+# most twice a day and only on a draw day with something still outstanding.
+#
+# COST TO SINGAPORE POOLS is two ~25KB fragments per look, on draw evenings
+# only, in the gap between 6.28pm and the result — typically ten to twenty
+# looks. A special draw whose result is late costs one look every four minutes
+# until 11.30pm. Their own site's JavaScript polls the same two files.
+
+WINDOW_OPEN = (18, 28)   # SGT, first look — results are never up before 6.30
+WINDOW_CLOSE = (23, 30)  # SGT, last look — after this the catch-up runs own it
+POLL_FAST_S = 90         # in the first hour after the draw, when it usually lands
+POLL_SLOW_S = 240        # after that: a late prize table or a special draw
+# Under GitHub's six-hour job limit, with room for the hand-over itself.
+BUDGET = timedelta(hours=5, minutes=35)
+
+
+def sgt_at(day: datetime, hm: tuple[int, int]) -> datetime:
+    return day.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
+
+
+def sleep_until(when: datetime, why: str) -> None:
+    import time
+
+    seconds = (when - datetime.now(SGT)).total_seconds()
+    if seconds <= 0:
+        return
+    print(f"{why} — sleeping {int(seconds // 60)}m{int(seconds % 60):02d}s until {when:%H:%M} SGT", flush=True)
+    time.sleep(seconds)
+
+
+def publish() -> bool:
+    """
+    Commit and push latest.json, when running in the workflow.
+
+    `publish.sh` is the same steps the workflow used to run once at the end of
+    the job; with the job now living through the evening they run after every
+    write instead, so the 4D result reaches phones while the TOTO prize table
+    is still being waited for. Gated on HOBEH_PUBLISH so a `--watch` on a
+    laptop never pushes anything.
+    """
+    import subprocess
+
+    if os.environ.get("HOBEH_PUBLISH") != "1":
+        print("HOBEH_PUBLISH is not set — written locally, not pushed")
+        return True
+    result = subprocess.run(["bash", str(HERE / "publish.sh")], check=False)
+    if result.returncode != 0:
+        print(f"publish.sh failed with {result.returncode} — will retry on the next change")
+    return result.returncode == 0
+
+
+def dispatch_successor() -> None:
+    """
+    Start another run of this workflow to carry on where this one's budget ends.
+
+    Only from inside Actions, and only when `gh` can see a token. The workflow
+    grants `actions: write` for exactly this call.
+    """
+    import subprocess
+
+    workflow = os.environ.get("GITHUB_WORKFLOW_REF", "").split("@")[0].split("/")[-1]
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    if not (workflow and repo and os.environ.get("GH_TOKEN")):
+        print("not in Actions, or no token — cannot dispatch a successor")
+        return
+    print(f"handing over: dispatching {workflow} on {repo}", flush=True)
+    result = subprocess.run(
+        ["gh", "workflow", "run", workflow, "--repo", repo, "--ref", "main"],
+        check=False,
+    )
+    if result.returncode != 0:
+        print("dispatch failed — the scheduled runs are the fallback")
+
+
+def watch(args) -> int:
+    started = datetime.now(SGT)
+    budget_end = started + BUDGET
+    print(f"watch started {started:%a %d %b %H:%M} SGT, budget until {budget_end:%H:%M}")
+
+    while True:
+        today = datetime.now(SGT).strftime("%Y-%m-%d")
+        if not args.force and not due_games(read_latest(), today):
+            print(f"nothing due on {today} — done", flush=True)
+            return 0
+
+        if run_pass(args):
+            publish()
+        if args.force:
+            return 0
+        if not due_games(read_latest(), today):
+            print("everything due today has been published — done", flush=True)
+            return 0
+
+        now = datetime.now(SGT)
+        open_at = sgt_at(now, WINDOW_OPEN)
+        close_at = sgt_at(now, WINDOW_CLOSE)
+
+        if now >= close_at:
+            print("past the end of the window — the catch-up runs have it from here")
+            return 0
+
+        if now < open_at:
+            # Before the draw. Wait for it — or, if this job cannot stay awake
+            # long enough to see the result, wait out the budget and hand over
+            # so the successor's six hours start as close to 6.30 as possible.
+            if open_at + timedelta(minutes=45) > budget_end:
+                sleep_until(budget_end - timedelta(minutes=2), "budget ends before the draw")
+                dispatch_successor()
+                return 0
+            sleep_until(open_at, "waiting for the draw")
+            continue
+
+        poll = POLL_FAST_S if now < open_at + timedelta(hours=1) else POLL_SLOW_S
+        if now + timedelta(seconds=poll) > budget_end:
+            dispatch_successor()
+            return 0
+        sleep_until(now + timedelta(seconds=poll), f"still due: {', '.join(due_games(read_latest(), today))}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--game", choices=["4D", "TOTO", "all"], default="all")
+    parser.add_argument("--check-scraper", action="store_true",
+                        help="only verify the vendored scraper, then exit")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="scrape and report, but do not write latest.json")
+    parser.add_argument("--force", action="store_true",
+                        help="scrape even when nothing is due today")
+    parser.add_argument("--watch", action="store_true",
+                        help="stay up through the evening and publish each result as it lands")
+    args = parser.parse_args()
+
+    if args.check_scraper:
+        return 0 if check_scraper_matches() else 1
+    if not check_scraper_matches():
+        return 1
+
+    if args.watch:
+        return watch(args)
+    run_pass(args)
     return 0
 
 
