@@ -88,11 +88,10 @@ Draw results are published by Singapore Pools.
 
 `.github/workflows/update-draws.yml` runs every ten minutes between 6.30pm and
 10pm SGT, plus four catch-up runs spread through the following twelve hours, and
-commits `latest.json` itself. **Nothing of mine has to be switched on** — not the MacBook, not the
-pieface. The app reads this file straight from `raw.githubusercontent.com`.
+commits `latest.json` itself. **No other machine has to be switched on.** The app reads this file straight from `raw.githubusercontent.com`.
 
     build_latest.py   decides what to fetch, converts it to the app's schema
-    scraper.py        a byte-for-byte copy of the pieface updater's parser
+    scraper.py        a byte-for-byte copy of the original scraper's parser
     scraper.sha256    fails the build if that copy drifts
     summarise.py      the commit message
 
@@ -138,21 +137,18 @@ a TOTO draw's numbers and its prize table, then nothing at all. Expect "within
 ten to thirty minutes" of a result being published, and read the section above
 before assuming a longer gap is a bug in this repo.
 
-The pieface updater still writes the Obsidian vault on its own timers. That is
-now an **independent** job — it can be off for a week without the app noticing,
-and the app being current says nothing about whether the vault is.
+The older archive updater still runs separately. It is an **independent** job:
+it can be off for a week without the app noticing.
 
-`npm run publish-draws:push` in the app repo **no longer exists** — `--push` is
-refused there. The vault is a historical record now and can be behind, so
-publishing from it would walk every phone backwards. Use `workflow_dispatch`
-above instead.
+Publishing from the app repo **no longer exists** — `--push` is refused there.
+That archive is a historical record now and can be behind, so publishing from it
+would walk every phone backwards. Use `workflow_dispatch` above instead.
 
 ### Keeping the two parsers in step
 
-`scraper.py` is copied, not imported, because the pieface and GitHub cannot
-share a filesystem. After editing the pieface copy:
+`scraper.py` is copied, not imported, because the original lives outside
+GitHub. After editing the original, copy it over `scraper.py` and then:
 
-    cp ~/AIOS-Vault/Efforts/买HoBeh/pieface-updater/update_4d_toto.py scraper.py
     shasum -a 256 scraper.py | awk '{print $1"  scraper.py"}' > scraper.sha256
 
 The workflow's first step is `--check-scraper`, so a forgotten copy fails the

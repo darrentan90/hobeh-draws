@@ -5,22 +5,22 @@ switched on.
 
 WHAT THIS REPLACED
 ------------------
-The chain used to be: pieface scrapes -> Syncthing carries it to a Mac -> the
-Mac runs `npm run publish-draws:push` by hand -> the app sees it. Two machines
+The chain used to be: a home machine scrapes -> the result is synced to a
+second machine -> that one publishes by hand -> the app sees it. Two machines
 had to be awake and one step was manual, so results reached phones whenever
 somebody sat down, not when they were published.
 
-This script is the same scrape with the two machines taken out. The pieface
-updater still writes the Obsidian vault whenever it happens to be running;
-that is now an independent job, not a link in this chain.
+This script is the same scrape with the two machines taken out. The original
+updater still runs on its own; it is an independent job, not a link in this
+chain.
 
 ONE PARSER, NOT TWO
 -------------------
 Singapore Pools' markup is the fragile part, so it is deliberately NOT
-reimplemented here. `scraper.py` is a byte-for-byte copy of the pieface
+reimplemented here. `scraper.py` is a byte-for-byte copy of the original
 updater's `update_4d_toto.py`, imported for its `scrape_*` functions; this
 file only decides what to fetch and how to write it out. Re-copy that file
-when the pieface one changes — `--check-scraper` fails the build if the copy
+when the original changes — `--check-scraper` fails the build if the copy
 has drifted from the checksum recorded in scraper.sha256.
 
 BEING QUIET ABOUT IT
@@ -74,7 +74,7 @@ def load_scraper():
     """Import the vendored scraper for its parsing functions."""
     import importlib.util
 
-    # It reads HOBEH_DIR at import time for the vault it writes on the Pi.
+    # It reads HOBEH_DIR at import time for the archive the original writes.
     # Nothing here calls those paths, but the variable has to exist.
     os.environ.setdefault("HOBEH_DIR", str(HERE / ".unused"))
     spec = importlib.util.spec_from_file_location("hobeh_scraper", SCRAPER)
@@ -125,14 +125,14 @@ def trim(rows: list) -> list:
 
 
 # ─── the scraper's shape is not the app's shape ──────────────────────────────
-# The scraper speaks the vault's language, because that is what it was written
+# The scraper speaks the archive's language, because that is what it was written
 # for: `draw_date` is "Wed, 19 Aug 2026" and `draw_no` is a string. latest.json
 # is read by the app, whose validator (parse() in src/data/remoteDraws.ts)
 # requires an ISO date and drops — silently, row by row — anything else. Ship
 # the raw rows and every new draw disappears with no error anywhere.
 #
-# This is the same conversion publish-draws.js did on the Mac; it has to live
-# here now that the Mac is out of the loop.
+# This is the same conversion the old manual publish step did; it has to live
+# here now that that step is gone.
 
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -636,8 +636,8 @@ def publish() -> bool:
     `publish.sh` is the same steps the workflow used to run once at the end of
     the job; with the job now living through the evening they run after every
     write instead, so the 4D result reaches phones while the TOTO prize table
-    is still being waited for. Gated on HOBEH_PUBLISH so a `--watch` on a
-    laptop never pushes anything.
+    is still being waited for. Gated on HOBEH_PUBLISH so a local `--watch`
+    never pushes anything.
     """
     import subprocess
 

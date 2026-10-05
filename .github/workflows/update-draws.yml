@@ -1,10 +1,8 @@
-# Publish new 4D and TOTO results without anything of mine being switched on.
+# Publish new 4D and TOTO results with no other machine switched on.
 #
 # This is the whole point of the job: the app reads latest.json straight from
-# this repo, so once GitHub is the thing that writes it, neither the Mac nor
-# the pieface is on the path between a draw being published and a phone seeing
-# it. The pieface still writes the Obsidian vault on its own timers; that is
-# now a separate concern that can be down for a week without the app noticing.
+# this repo, so once GitHub is the thing that writes it, no other machine is on
+# the path between a draw being published and a phone seeing it.
 #
 # COST TO SINGAPORE POOLS
 # A look with no new draw fetches two small pre-rendered fragments — the same
@@ -100,7 +98,7 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      # The parser is a vendored copy of the pieface updater's. If someone
+      # The parser is a vendored copy of the original updater's. If someone
       # edits one and not the other, fail here rather than publish whatever
       # the drifted copy happens to produce.
       - name: Check the vendored scraper
