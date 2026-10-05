@@ -82,7 +82,16 @@ jobs:
     # itself and hands over before that; this is the backstop.
     timeout-minutes: 355
     steps:
+      # `ref: main`, not the default. The default checks out the commit the
+      # run was CREATED at, and a run queued behind a live watcher (see
+      # `concurrency`) can wait an hour before it starts. It then woke on a
+      # latest.json from before the draw the first watcher had just pushed,
+      # scraped that draw again, and hit a rebase conflict pushing it — the
+      # draw was already on phones, but the run "failed". Every failed run
+      # from 19 Sep to 5 Oct 2026 was this.
       - uses: actions/checkout@v4
+        with:
+          ref: main
 
       - uses: actions/setup-python@v5
         with:

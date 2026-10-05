@@ -19,6 +19,17 @@ git add latest.json
 git commit -m "$SUMMARY"
 # Rebase rather than force: a concurrent run may have landed first, and its
 # draws are as real as this run's.
-git pull --rebase --autostash origin main
+if ! git pull --rebase --autostash origin main; then
+  # latest.json is generated, so a conflict means another run published the
+  # same file first. Hand-merging JSON is never the answer: drop this commit
+  # and take main's. Whatever main lacks is still "due" when the watcher next
+  # reads the file, so it is scraped and published again on the next pass.
+  # Leaving the rebase half-done was the old behaviour, and it left conflict
+  # markers in latest.json for the watcher to crash on.
+  git rebase --abort || true
+  git reset --hard origin/main
+  echo "another run published first — took origin/main, nothing lost"
+  exit 0
+fi
 git push
 echo "published: $SUMMARY"
