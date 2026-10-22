@@ -252,19 +252,27 @@ def due_games(data: dict, today: str) -> list[str]:
     So TOTO stays due until the row for today carries `shares`. Those extra
     runs cost one pre-rendered fragment each, only on the evening of a TOTO
     draw, and only in the gap between the numbers and the table.
+
+    NOR IS IT FINISHED UNTIL THE PAGE NAMES THE NEXT DRAW
+    -----------------------------------------------------
+    Singapore Pools goes on showing the draw it has just made — its date and
+    its jackpot — for a while after the result is up, and the app shows what
+    the page shows. A game whose `upcoming.drawDate` is still today or earlier
+    therefore stays due, and the watch keeps looking until the page moves on,
+    so the next draw and its jackpot reach phones the evening they appear
+    rather than whenever the next catch-up run happens to start.
     """
     due = []
     for game, key in (("4D", "fourD"), ("TOTO", "toto")):
         today_row = next(
             (row for row in data.get(key) or [] if row["draw_date"] == today), None
         )
-        if today_row is not None:
-            # Collected. Done, unless the TOTO prize table is still to come.
-            if game == "TOTO" and not today_row.get("shares"):
-                due.append(game)
-            continue
         expected = ((data.get("upcoming") or {}).get(key) or {}).get("drawDate")
-        if not expected or expected <= today:
+        if today_row is not None and game == "TOTO" and not today_row.get("shares"):
+            # Collected, but the TOTO prize table is still to come.
+            due.append(game)
+        elif not expected or expected <= today:
+            # Not collected yet, or collected while the page still names it.
             due.append(game)
     return due
 
@@ -400,11 +408,6 @@ def run_pass(args) -> bool:
     `publish()` does that, and `watch()` decides when.
     """
     data = read_latest()
-    # What the app is already being served. A TOTO draw that is in here has
-    # been published as a whole draw and must never be taken back off; one that
-    # is not is a draw this run collected, and is subject to the completeness
-    # gate below.
-    already_published = {row["draw_date"] for row in data.get("toto") or []}
     today = datetime.now(SGT).strftime("%Y-%m-%d")
     games = ["4D", "TOTO"] if args.game == "all" else [args.game]
 
@@ -424,11 +427,9 @@ def run_pass(args) -> bool:
         Everything in the file except the timestamp on it.
 
         `changed` used to be a flag half a dozen branches had to remember to
-        set, and the withholding above broke it: a run that collects a TOTO
-        draw and then holds it back has added rows to `data` and published
-        nothing, so the flag said "changed" and the job stamped a new
-        `generated`, committed a byte-identical file and busted every phone's
-        cache for it. Comparing what actually goes into the file cannot drift
+        set, and a missed branch meant a run that published nothing could still
+        stamp a new `generated`, commit a byte-identical file and bust every
+        phone's cache for it. Comparing what actually goes into the file cannot drift
         from what the file contains, because it *is* what the file contains.
         """
         return json.dumps(
@@ -439,9 +440,6 @@ def run_pass(args) -> bool:
         )
 
     published_before = payload(data)
-    # Set when a TOTO draw is being held back, so the rest of the TOTO block
-    # holds back with it. See the withholding note below.
-    toto_withheld = False
 
     for game in games:
         key = "fourD" if game == "4D" else "toto"
@@ -472,44 +470,14 @@ def run_pass(args) -> bool:
                         row["group_1_prize"] = int(pool)
                     break
 
-            # ── A TOTO DRAW IS PUBLISHED WHOLE OR NOT AT ALL ──────────────
+            # ── THE NUMBERS GO OUT THE MOMENT THEY ARE UP ─────────────────
             #
             # Singapore Pools puts the winning numbers up several minutes
-            # before the prize table, and this used to forward each half the
-            # moment it landed: one commit carrying a draw with no group prize
-            # and no winning shares, then a second commit some minutes later
-            # filling them in. Two publishes, and the first of them a draw that
-            # is not finished being a draw.
-            #
-            # That is not a cosmetic problem. The app treats the newest row as
-            # the latest draw the instant it arrives — it opens Latest Draw on
-            # it and fires "the TOTO results are out" — so the first publish
-            # sent every phone a notification about a result whose prize table
-            # did not exist yet, and the user who tapped it got a Latest Draw
-            # with the payout half of the screen missing.
-            #
-            # So a newly collected TOTO draw is WITHHELD until its prize table
-            # is attached. It stays out of the published file, `due_games` sees
-            # no row for today and keeps the game due, and a later run in the
-            # evening collects the numbers and the table together and publishes
-            # them as one update. The cost is re-fetching one result page on
-            # each run in the gap, which is only ever the evening of a TOTO
-            # draw and only ever the minutes between the two halves.
-            withheld = [
-                row
-                for row in data["toto"]
-                if row["draw_date"] not in already_published and not row.get("shares")
-            ]
-            if withheld:
-                dates = ", ".join(row["draw_date"] for row in withheld)
-                print(
-                    f"TOTO: WITHHELD {dates} — numbers are up but the prize "
-                    "table is not. Nothing published; the next run will try "
-                    "again and publish the draw whole."
-                )
-                data["toto"] = [row for row in data["toto"] if row not in withheld]
-                newest = max((r["draw_date"] for r in data["toto"]), default=None)
-                toto_withheld = True
+            # before the prize table. This used to withhold a draw until its
+            # table was attached, so phones heard about the result long after
+            # it was out. Now the numbers publish
+            # on their own, the app announces them, and `due_games` keeps TOTO
+            # due so a later look attaches the table as a second, quiet update.
 
             # The prize table is only ever carried for the newest draw, and it
             # has to be carried for the newest draw. Older overlay rows drop
@@ -522,9 +490,7 @@ def run_pass(args) -> bool:
             # before the table does and stripping on the numbers alone leaves
             # the app with no prize data at all — not for the draw that just
             # happened, and not for the one before it either. That is what
-            # draw 4211 shipped as. With the withholding above the newest
-            # published draw always has its table, but the guard stays: it is
-            # what makes the two rules independent of each other.
+            # draw 4211 shipped as.
             newest_has_table = any(
                 r["draw_date"] == newest and r.get("shares") for r in data["toto"]
             )
@@ -536,25 +502,15 @@ def run_pass(args) -> bool:
                         row.pop("shares", None)
                         row.pop("group_1_prize", None)
 
-            # Said loudly, because it is the one thing on Latest Draw people
-            # open the app for. Reaching this now means a draw that was already
-            # published has lost its table, which should not be possible.
             if newest and not newest_has_table:
-                print(f"TOTO: WARNING — newest draw {newest} has no prize table yet")
+                print(f"TOTO: newest draw {newest} has no prize table yet — still watching")
 
         before = (data.get("upcoming") or {}).get(key)
         after = upcoming_block(game, scraper, session, before)
-        # The next-draw date moves the moment a draw is made: within seconds of
-        # 6.30pm the page stops saying "Thu 27 Aug" and starts saying "Mon 31
-        # Aug". Publishing that on its own, while the draw it steps over is
-        # being withheld for its prize table, is the same partial update in a
-        # different place — the app is told Thursday's draw has happened and
-        # handed Monday's date, with Thursday's result nowhere in the file.
-        # That is exactly what a user sees as "the next draw updated but the
-        # result did not". It travels with the draw or not at all.
-        if toto_withheld and game == "TOTO":
-            print("TOTO: next-draw date held back with the draw it follows")
-        elif meaningful(after) != meaningful(before):
+        # Whatever the page says, published as it says it: the app follows
+        # Singapore Pools, including while the page still names a draw that
+        # has just been made.
+        if meaningful(after) != meaningful(before):
             data.setdefault("upcoming", {})[key] = after
 
     data["version"] = SCHEMA_VERSION
