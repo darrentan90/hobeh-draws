@@ -58,6 +58,11 @@ on:
   # slot, and how a watcher hands over to its successor when its six hours
   # run out before the draw is in: Actions → Update draws → Run workflow.
   workflow_dispatch:
+    inputs:
+      push_only:
+        description: "Only send phones a test push for the current commit (no scrape)"
+        type: boolean
+        default: false
 
 # One watcher at a time. A run created while another is live queues behind it
 # rather than racing it to the push; GitHub keeps one queued run per group and
@@ -107,10 +112,23 @@ jobs:
       # Sleeps until the draw, looks every ninety seconds until the day's
       # results are in, and runs publish.sh after every write — so a 4D result
       # is on phones while the TOTO prize table is still being waited for.
+      # Actions → Update draws → Run workflow → tick "push only": wakes every
+      # phone to fetch the file as it is now, which is how the push is tested
+      # without waiting for a draw. Phones announce nothing they have announced.
+      - name: Test push only
+        if: ${{ inputs.push_only }}
+        env:
+          FCM_SERVICE_ACCOUNT: ${{ secrets.FCM_SERVICE_ACCOUNT }}
+        run: python build_latest.py --push-only
+
       - name: Watch for today's draws and publish each as it lands
+        if: ${{ !inputs.push_only }}
         env:
           HOBEH_PUBLISH: "1"
           GH_TOKEN: ${{ github.token }}
+          # Firebase service account, for the push to phones after each
+          # publish. Absent, publishing works exactly as before, unpushed.
+          FCM_SERVICE_ACCOUNT: ${{ secrets.FCM_SERVICE_ACCOUNT }}
           PYTHONUNBUFFERED: "1"
         run: python build_latest.py --watch
 
@@ -118,4 +136,5 @@ jobs:
       # could not be resolved, a network blip on the runner) is retried here.
       # No change is the normal outcome and does nothing.
       - name: Publish anything still unpushed
+        if: ${{ !inputs.push_only }}
         run: bash publish.sh

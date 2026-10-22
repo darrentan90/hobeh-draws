@@ -603,7 +603,77 @@ def publish() -> bool:
     result = subprocess.run(["bash", str(HERE / "publish.sh")], check=False)
     if result.returncode != 0:
         print(f"publish.sh failed with {result.returncode} — will retry on the next change")
-    return result.returncode == 0
+        return False
+    notify_phones()
+    return True
+
+
+# ─── the push ────────────────────────────────────────────────────────────────
+#
+# WHY THE PHONES ARE TOLD, NOT LEFT TO ASK
+# ----------------------------------------
+# Android decides when a rarely opened app may wake up and look, and for a
+# lottery checker that is seldom: alarms throttled to about one an hour,
+# periodic work deferred to whenever Doze next opens a window. Results reached
+# phones late, or only when the app was opened. A high-priority Firebase Cloud
+# Messaging message is the one thing Android delivers straight away to an idle
+# phone, so every publish sends one to the `draws` topic the app subscribes to.
+#
+# The message is data only and says nothing to the user; it wakes the app,
+# which fetches and decides for itself what to announce. It carries the commit
+# just pushed, because raw.githubusercontent.com serves `main` from a cache
+# for minutes and the push arrives in seconds — the app fetches that commit's
+# file instead. Topic messaging needs no list of devices, so nothing about
+# anyone is stored here or anywhere else.
+
+FCM_TOPIC = "draws"  # the app's push.ts subscribes to the same name
+FCM_TTL = "21600s"   # a draw is old news after six hours; drop it, don't queue it
+
+
+def notify_phones() -> None:
+    """
+    Push "a draw is out" to every phone. Best effort: the phones still look by
+    themselves on their own schedule, so a failure here is logged, not fatal.
+
+    Needs FCM_SERVICE_ACCOUNT, the Firebase service-account JSON, as a
+    repository secret. Without it this is a no-op.
+    """
+    import subprocess
+
+    raw = os.environ.get("FCM_SERVICE_ACCOUNT", "")
+    if not raw:
+        print("FCM_SERVICE_ACCOUNT is not set — phones not pushed")
+        return
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2 import service_account
+
+        info = json.loads(raw)
+        creds = service_account.Credentials.from_service_account_info(
+            info, scopes=["https://www.googleapis.com/auth/firebase.messaging"]
+        )
+        creds.refresh(Request())
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=HERE, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        response = requests.post(
+            f"https://fcm.googleapis.com/v1/projects/{info['project_id']}/messages:send",
+            headers={"Authorization": f"Bearer {creds.token}"},
+            json={
+                "message": {
+                    "topic": FCM_TOPIC,
+                    "data": {"kind": "draws", "commit": commit},
+                    "android": {"priority": "HIGH", "ttl": FCM_TTL},
+                }
+            },
+            timeout=20,
+        )
+        if response.ok:
+            print(f"phones pushed for {commit[:7]}")
+        else:
+            print(f"push failed: HTTP {response.status_code} {response.text[:300]}")
+    except Exception as exc:  # noqa: BLE001 - the publish itself has succeeded
+        print(f"push failed: {exc.__class__.__name__}: {exc}")
 
 
 def dispatch_successor() -> None:
@@ -685,7 +755,13 @@ def main() -> int:
                         help="scrape even when nothing is due today")
     parser.add_argument("--watch", action="store_true",
                         help="stay up through the evening and publish each result as it lands")
+    parser.add_argument("--push-only", action="store_true",
+                        help="only push phones for the current commit, to test the push")
     args = parser.parse_args()
+
+    if args.push_only:
+        notify_phones()
+        return 0
 
     if args.check_scraper:
         return 0 if check_scraper_matches() else 1
